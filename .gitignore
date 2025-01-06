@@ -1,0 +1,4 @@
+venv/
+*.pyc
+*.pyo
+docker_compose_files/
