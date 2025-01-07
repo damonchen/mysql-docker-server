@@ -11,3 +11,16 @@
 - 这个服务开启的总的mysql进程有限制，如果达到最大限制，则需要将需要创建的mysql进程信息保存起来，等有mysql进程关闭后，再创建
 - 如果整个web服务关闭，则这个服务需要将所有开启的mysql进程关闭
 - mysql进程是在docker-compose.yaml文件中启动的，所以需要通过docker-compose.yaml文件来管理mysql进程 
+
+
+## 测试
+
+```bash
+curl -X POST http://localhost:5600/mysql/start \
+     -H "Content-Type: application/json" \
+     -d '{"mysql_root_password": "your_password", "init_sql": "CREATE DATABASE test; USE test; CREATE TABLE test_table (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255));"}'
+```
+
+```bash
+curl -X POST http://localhost:5600/mysql/stop/3306
+```

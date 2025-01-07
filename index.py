@@ -7,6 +7,7 @@ import threading
 from queue import Queue
 import subprocess
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
@@ -47,7 +48,8 @@ def generate_docker_compose(port: int, mysql_root_password: str) -> str:
         'version': '3',
         'services': {
             f'mysql_{port}': {
-                'image': 'mysql:5.7',
+                'image': 'mysql:8.0',
+                'container_name': f'mysql_{port}',
                 'ports': [f'{port}:3306'],
                 'environment': {
                     'MYSQL_ROOT_PASSWORD': mysql_root_password
@@ -68,16 +70,26 @@ def write_docker_compose(port: int, content: str) -> str:
         f.write(content)
     return filename
 
-def async_start_mysql(port: int, compose_file: str, project_name: str):
+def async_start_mysql(port: int, compose_file: str, project_name: str, mysql_root_password: str, sql_file: str = None):
     """异步启动MySQL实例"""
     try:
         # 使用subprocess替代os.system，这样可以获取更多控制和输出信息
         process = subprocess.run(
             f'docker-compose -f {compose_file} -p {project_name} up -d',
             shell=True,
-            capture_output=True,
+            # capture_output=True,
             text=True
         )
+
+        if sql_file:
+            # 等待MySQL容器启动后，执行初始化SQL
+            time.sleep(3)
+            subprocess.run(
+                f'docker exec -i {project_name} mysql -h 127.0.0.1 -u root -p{mysql_root_password} < {sql_file}',
+                shell=True,
+                # capture_output=True,
+                text=True
+            )
         
         if process.returncode == 0:
             running_instances[port]['status'] = INSTANCE_STATUS['RUNNING']
@@ -89,7 +101,7 @@ def async_start_mysql(port: int, compose_file: str, project_name: str):
         running_instances[port]['status'] = INSTANCE_STATUS['FAILED']
         running_instances[port]['error'] = str(e)
 
-def start_mysql_instance(port: int, mysql_root_password: str) -> dict:
+def start_mysql_instance(port: int, mysql_root_password: str, sql_file: str = None) -> dict:
     """启动MySQL实例"""
     compose_content = generate_docker_compose(port, mysql_root_password)
     compose_file = write_docker_compose(port, compose_content)
@@ -103,6 +115,7 @@ def start_mysql_instance(port: int, mysql_root_password: str) -> dict:
         'password': mysql_root_password,
         'compose_file': compose_file,
         'project_name': project_name,
+        'sql_file': sql_file,
         'status': INSTANCE_STATUS['STARTING'],
         'error': None
     }
@@ -110,7 +123,7 @@ def start_mysql_instance(port: int, mysql_root_password: str) -> dict:
     running_instances[port] = instance_info
     
     # 异步启动MySQL实例
-    executor.submit(async_start_mysql, port, compose_file, project_name)
+    executor.submit(async_start_mysql, port, compose_file, project_name, mysql_root_password, sql_file)
     
     return instance_info
 
@@ -122,6 +135,7 @@ def stop_mysql_instance(port: int):
     instance_info = running_instances[port]
     compose_file = instance_info['compose_file']
     project_name = instance_info['project_name']
+    sql_file = instance_info['sql_file']
     
     # 停止并删除容器
     os.system(f'docker-compose -f {compose_file} -p {project_name} down -v')
@@ -129,6 +143,10 @@ def stop_mysql_instance(port: int):
     # 删除docker-compose文件
     if os.path.exists(compose_file):
         os.remove(compose_file)
+
+    # 删除初始化SQL文件
+    if sql_file and os.path.exists(sql_file):
+        os.remove(sql_file)
     
     del running_instances[port]
 
@@ -142,8 +160,26 @@ def process_waiting_queue():
 @app.route('/mysql/start', methods=['POST'])
 def start_mysql():
     """启动MySQL服务的API端点"""
+    # 获取请求数据
+    if not request.is_json:
+        return jsonify({
+            'status': 'error', 
+            'message': 'Content-Type must be application/json'
+        }), 400
+        
     data = request.get_json()
     mysql_root_password = data.get('mysql_root_password', 'root')
+    init_sql = data.get('init_sql')
+    
+    port = get_next_available_port()
+
+    # 如果提供了初始化SQL,保存到文件
+    sql_file = None
+    if init_sql:
+        sql_filename = os.path.join(DOCKER_COMPOSE_DIR, f'init_{port}.sql')
+        with open(sql_filename, 'w') as f:
+            f.write(init_sql)
+        sql_file = sql_filename
     
     if len(running_instances) >= MAX_MYSQL_INSTANCES:
         waiting_queue.put({'mysql_root_password': mysql_root_password})
@@ -152,8 +188,7 @@ def start_mysql():
             'message': 'Maximum number of MySQL instances reached. Request queued.'
         }), 202
     
-    port = get_next_available_port()
-    instance_info = start_mysql_instance(port, mysql_root_password)
+    instance_info = start_mysql_instance(port, mysql_root_password, sql_file)
     
     return jsonify({
         'status': 'accepted',
